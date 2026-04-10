@@ -185,6 +185,14 @@ class ColSampler {
     return is_feature_used_;
   }
 
+  unsigned int random_state() const {
+    return random_.State();
+  }
+
+  void set_random_state(unsigned int state) {
+    random_.SetState(state);
+  }
+
   void SetIsFeatureUsedByTree(int fid, bool val) {
     is_feature_used_[fid] = val;
   }

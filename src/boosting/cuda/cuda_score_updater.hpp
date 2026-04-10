@@ -40,6 +40,10 @@ class CUDAScoreUpdater: public ScoreUpdater {
     }
   }
 
+  std::vector<double> ScoreSnapshot() const override;
+
+  void LoadScoreSnapshot(const std::vector<double>& scores) override;
+
   /*! \brief Disable copy */
   CUDAScoreUpdater& operator=(const CUDAScoreUpdater&) = delete;
 

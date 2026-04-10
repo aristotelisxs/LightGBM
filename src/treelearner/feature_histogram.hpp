@@ -1523,6 +1523,23 @@ class HistogramPool {
     }
   }
 
+  std::vector<unsigned int> ExtraTreesRandomStates() const {
+    std::vector<unsigned int> states(feature_metas_.size(), 0);
+    for (size_t i = 0; i < feature_metas_.size(); ++i) {
+      states[i] = feature_metas_[i].rand.State();
+    }
+    return states;
+  }
+
+  void SetExtraTreesRandomStates(const std::vector<unsigned int>& states) {
+    if (!states.empty() && states.size() != feature_metas_.size()) {
+      Log::Fatal("Snapshot extra_trees state does not match the current training data");
+    }
+    for (size_t i = 0; i < states.size(); ++i) {
+      feature_metas_[i].rand.SetState(states[i]);
+    }
+  }
+
   /*!
    * \brief Get data for the specific index
    * \param idx which index want to get

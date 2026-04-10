@@ -108,6 +108,19 @@ class ScoreUpdater {
   /*! \brief Pointer of score */
   virtual inline const double* score() const { return score_.data(); }
 
+  virtual inline std::vector<double> ScoreSnapshot() const {
+    return std::vector<double>(score_.begin(), score_.end());
+  }
+
+  virtual inline void LoadScoreSnapshot(const std::vector<double>& scores) {
+    if (scores.size() != score_.size()) {
+      Log::Fatal("Snapshot score buffer does not match the dataset shape");
+    }
+    for (size_t i = 0; i < scores.size(); ++i) {
+      score_[i] = scores[i];
+    }
+  }
+
   inline data_size_t num_data() const { return num_data_; }
 
   /*! \brief Disable copy */

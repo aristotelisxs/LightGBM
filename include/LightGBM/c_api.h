@@ -821,6 +821,15 @@ LIGHTGBM_C_EXPORT int LGBM_BoosterGetCurrentIteration(BoosterHandle handle,
                                                       int* out_iteration);
 
 /*!
+ * \brief Get the current iteration inside the active training session.
+ * \param handle Handle of booster
+ * \param out_iteration Iteration number of the current training session
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_BoosterGetCurrentTrainingIteration(BoosterHandle handle,
+                                                              int* out_iteration);
+
+/*!
  * \brief Get number of trees per iteration.
  * \param handle Handle of booster
  * \param[out] out_tree_per_iteration Number of trees per iteration
@@ -1493,6 +1502,24 @@ LIGHTGBM_C_EXPORT int LGBM_BoosterSaveModelToString(BoosterHandle handle,
                                                     int64_t buffer_len,
                                                     int64_t* out_len,
                                                     char* out_str);
+
+/*!
+ * \brief Save the full training snapshot to a file.
+ * \param handle Handle of booster
+ * \param filename Path to the snapshot file
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_BoosterSaveSnapshot(BoosterHandle handle,
+                                               const char* filename);
+
+/*!
+ * \brief Load a full training snapshot from a file into an initialized booster.
+ * \param handle Handle of booster
+ * \param filename Path to the snapshot file
+ * \return 0 when succeed, -1 when failure happens
+ */
+LIGHTGBM_C_EXPORT int LGBM_BoosterLoadSnapshot(BoosterHandle handle,
+                                               const char* filename);
 
 /*!
  * \brief Dump model to JSON.

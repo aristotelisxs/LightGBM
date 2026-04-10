@@ -164,6 +164,8 @@ class GBDT : public GBDTBase {
   */
   int GetCurrentIteration() const override { return static_cast<int>(models_.size()) / num_tree_per_iteration_; }
 
+  int GetCurrentTrainingIteration() const override { return iter_; }
+
   /*!
   * \brief Get parameters as a JSON string
   */
@@ -368,6 +370,10 @@ class GBDT : public GBDTBase {
   */
   bool LoadModelFromString(const char* buffer, size_t len) override;
 
+  bool SaveTrainingSnapshot(const char* filename) const override;
+
+  bool LoadTrainingSnapshot(const char* filename) override;
+
   /*!
   * \brief Calculate feature importances
   * \param num_iteration Number of model that want to use for feature importance, -1 means use all
@@ -471,6 +477,10 @@ class GBDT : public GBDTBase {
   inline std::string ParserConfigStr() const override {return parser_config_str_;}
 
  protected:
+  virtual std::string SnapshotTrainingState() const;
+
+  virtual void LoadSnapshotTrainingState(const std::string& state);
+
   virtual bool GetIsConstHessian(const ObjectiveFunction* objective_function) {
     if (objective_function != nullptr && !data_sample_strategy_->IsHessianChange()) {
       return objective_function->IsConstantHessian();
@@ -520,6 +530,9 @@ class GBDT : public GBDTBase {
   */
   void ResetGradientBuffers();
 
+  void RestoreScoreUpdaters(const std::vector<double>& train_scores,
+                            const std::vector<std::vector<double>>& valid_scores);
+
   /*! \brief current iteration */
   int iter_;
   /*! \brief Pointer to training data */
@@ -536,6 +549,7 @@ class GBDT : public GBDTBase {
   std::vector<const Metric*> training_metrics_;
   /*! \brief Store and update validation data's scores */
   std::vector<std::unique_ptr<ScoreUpdater>> valid_score_updater_;
+  std::vector<const Dataset*> valid_data_;
   /*! \brief Metric for validation data */
   std::vector<std::vector<const Metric*>> valid_metrics_;
   /*! \brief Number of rounds for early stopping */
@@ -615,6 +629,7 @@ class GBDT : public GBDTBase {
   bool need_re_bagging_;
   bool balanced_bagging_;
   std::string loaded_parameter_;
+  std::string snapshot_reference_config_;
   std::vector<int8_t> monotone_constraints_;
   Json forced_splits_json_;
   bool linear_tree_;

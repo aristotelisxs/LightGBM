@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "predictor.hpp"
+#include "../io/snapshot_manager.hpp"
 
 namespace LightGBM {
 
@@ -174,6 +175,18 @@ void Application::LoadData() {
 }
 
 void Application::InitTrain() {
+  if (config_.save_snapshot) {
+    if (config_.snapshot_freq <= 0) {
+      Log::Fatal("save_snapshot=true requires snapshot_freq to be positive");
+    }
+    if (config_.snapshot_path.empty()) {
+      config_.snapshot_path = config_.output_model + ".snapshot";
+    }
+    if (!config_.input_model.empty() && SnapshotManager::Exists(config_.snapshot_path)) {
+      Log::Fatal("Cannot resume from snapshot when input_model is also set");
+    }
+  }
+
   if (config_.is_parallel) {
     // need init network
     Network::Init(config_);
@@ -210,6 +223,11 @@ void Application::InitTrain() {
     boosting_->AddValidDataset(valid_datas_[i].get(),
                                Common::ConstPtrInVectorWrapper<Metric>(valid_metrics_[i]));
     Log::Debug("Number of data points in validation set #%zu: %d", i + 1, valid_datas_[i]->num_data());
+  }
+  if (config_.save_snapshot && SnapshotManager::Exists(config_.snapshot_path)) {
+    boosting_->LoadTrainingSnapshot(config_.snapshot_path.c_str());
+    Log::Info("Resumed training from snapshot %s at iteration %d",
+              config_.snapshot_path.c_str(), boosting_->GetCurrentTrainingIteration());
   }
   Log::Info("Finished initializing training");
 }

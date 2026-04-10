@@ -1769,7 +1769,6 @@ class _InnerPredictor:
         )
         return out_cur_iter.value
 
-
 class Dataset:
     """
     Dataset in LightGBM.
@@ -4260,6 +4259,17 @@ class Booster:
         )
         return out_cur_iter.value
 
+    def current_training_iteration(self) -> int:
+        """Get the current iteration within the active training session."""
+        out_cur_iter = ctypes.c_int(0)
+        _safe_call(
+            _LIB.LGBM_BoosterGetCurrentTrainingIteration(
+                self._handle,
+                ctypes.byref(out_cur_iter),
+            )
+        )
+        return out_cur_iter.value
+
     def num_model_per_iteration(self) -> int:
         """Get number of models per iteration.
 
@@ -4497,6 +4507,17 @@ class Booster:
             )
         )
         _dump_pandas_categorical(self.pandas_categorical, filename)
+        return self
+
+    def save_snapshot(self, filename: Union[str, Path]) -> "Booster":
+        """Save the full training snapshot to a file."""
+        _safe_call(_LIB.LGBM_BoosterSaveSnapshot(self._handle, _c_str(str(filename))))
+        return self
+
+    def load_snapshot(self, filename: Union[str, Path]) -> "Booster":
+        """Load the full training snapshot from a file."""
+        _safe_call(_LIB.LGBM_BoosterLoadSnapshot(self._handle, _c_str(str(filename))))
+        self.__is_predicted_cur_iter = [False for _ in range(self.__num_dataset)]
         return self
 
     def shuffle_models(

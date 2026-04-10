@@ -79,6 +79,20 @@ def constant_metric_multi(preds, train_data):
     ]
 
 
+class _IntentionalTrainingStop(Exception):
+    pass
+
+
+def _stop_before_iteration(stop_iteration):
+    def _callback(env):
+        if env.iteration == stop_iteration:
+            raise _IntentionalTrainingStop()
+
+    _callback.order = 0
+    _callback.before_iteration = True
+    return _callback
+
+
 def decreasing_metric(preds, train_data):
     return ("decreasing_metric", next(decreasing_generator), False)
 
@@ -1185,6 +1199,120 @@ def test_continue_train_dart():
     ret = mean_absolute_error(y_test, gbm.predict(X_test))
     assert ret < 13.6
     assert evals_result["valid_0"]["l1"][-1] == pytest.approx(ret)
+
+
+def test_train_auto_resumes_from_snapshot(tmp_path):
+    X, y = make_synthetic_regression(n_samples=300, n_features=12, random_state=17)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=24)
+    lgb_train = lgb.Dataset(X_train, y_train, free_raw_data=False)
+    snapshot_path = tmp_path / "train.snapshot"
+    params = {
+        "objective": "regression",
+        "metric": "l2",
+        "verbose": -1,
+        "num_threads": 1,
+        "feature_fraction": 0.75,
+        "feature_fraction_seed": 7,
+        "extra_trees": True,
+        "extra_seed": 11,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 2,
+        "bagging_seed": 13,
+        "save_snapshot": True,
+        "snapshot_freq": 1,
+        "snapshot_path": str(snapshot_path),
+    }
+
+    baseline = lgb.train(
+        {k: v for k, v in params.items() if k not in {"save_snapshot", "snapshot_freq", "snapshot_path"}},
+        lgb_train,
+        num_boost_round=12,
+        keep_training_booster=True,
+    )
+
+    with pytest.raises(_IntentionalTrainingStop):
+        lgb.train(params, lgb_train, num_boost_round=12, callbacks=[_stop_before_iteration(7)])
+
+    resumed = lgb.train(params, lgb_train, num_boost_round=12, keep_training_booster=True)
+
+    assert resumed.current_training_iteration() == 12
+    np.testing.assert_allclose(baseline.predict(X_test), resumed.predict(X_test))
+    assert baseline.model_to_string() == resumed.model_to_string()
+    assert mean_squared_error(y_test, baseline.predict(X_test)) == pytest.approx(
+        mean_squared_error(y_test, resumed.predict(X_test))
+    )
+
+
+def test_train_auto_resumes_from_snapshot_in_dart(tmp_path):
+    X, y = make_synthetic_regression(n_samples=300, n_features=12, random_state=23)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=24)
+    lgb_train = lgb.Dataset(X_train, y_train, free_raw_data=False)
+    snapshot_path = tmp_path / "dart.snapshot"
+    params = {
+        "boosting_type": "dart",
+        "objective": "regression",
+        "metric": "l2",
+        "verbose": -1,
+        "num_threads": 1,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 2,
+        "bagging_seed": 5,
+        "drop_seed": 7,
+        "save_snapshot": True,
+        "snapshot_freq": 1,
+        "snapshot_path": str(snapshot_path),
+    }
+
+    baseline = lgb.train(
+        {k: v for k, v in params.items() if k not in {"save_snapshot", "snapshot_freq", "snapshot_path"}},
+        lgb_train,
+        num_boost_round=15,
+        keep_training_booster=True,
+    )
+
+    with pytest.raises(_IntentionalTrainingStop):
+        lgb.train(params, lgb_train, num_boost_round=15, callbacks=[_stop_before_iteration(9)])
+
+    resumed = lgb.train(params, lgb_train, num_boost_round=15, keep_training_booster=True)
+
+    assert resumed.current_training_iteration() == 15
+    np.testing.assert_allclose(baseline.predict(X_test), resumed.predict(X_test))
+    assert baseline.model_to_string() == resumed.model_to_string()
+
+
+def test_save_snapshot_requires_snapshot_path():
+    X, y = make_synthetic_regression()
+    lgb_train = lgb.Dataset(X, y)
+
+    with pytest.raises(ValueError, match="snapshot_path must be set"):
+        lgb.train(
+            params={"objective": "regression", "verbose": -1, "save_snapshot": True, "snapshot_freq": 1},
+            train_set=lgb_train,
+            num_boost_round=5,
+        )
+
+
+def test_save_snapshot_rejects_python_early_stopping(tmp_path):
+    X, y = make_synthetic_regression()
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    lgb_train = lgb.Dataset(X_train, y_train)
+    lgb_eval = lgb.Dataset(X_test, y_test, reference=lgb_train)
+
+    with pytest.raises(ValueError, match="save_snapshot is not compatible with Python early_stopping callbacks"):
+        lgb.train(
+            params={
+                "objective": "regression",
+                "metric": "l2",
+                "verbose": -1,
+                "save_snapshot": True,
+                "snapshot_freq": 1,
+                "snapshot_path": str(tmp_path / "train.snapshot"),
+                "early_stopping_round": 2,
+            },
+            train_set=lgb_train,
+            valid_sets=[lgb_eval],
+            num_boost_round=5,
+        )
 
 
 def test_continue_train_multiclass():

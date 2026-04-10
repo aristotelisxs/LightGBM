@@ -10,20 +10,29 @@
 #include <string>
 #include <vector>
 
+#include "../io/snapshot_serde.hpp"
+
 namespace LightGBM {
 
 class BaggingSampleStrategy : public SampleStrategy {
  public:
   BaggingSampleStrategy(const Config* config, const Dataset* train_data, const ObjectiveFunction* objective_function, int num_tree_per_iteration)
-    : need_re_bagging_(false) {
+    : need_re_bagging_(false),
+      num_threads_(OMP_NUM_THREADS()),
+      num_queries_(0),
+      num_sampled_queries_(0),
+      query_boundaries_(nullptr) {
     config_ = config;
     train_data_ = train_data;
-    num_data_ = train_data->num_data();
-    num_queries_ = train_data->metadata().num_queries();
-    query_boundaries_ = train_data->metadata().query_boundaries();
     objective_function_ = objective_function;
     num_tree_per_iteration_ = num_tree_per_iteration;
-    num_threads_ = OMP_NUM_THREADS();
+    num_data_ = train_data->num_data();
+    bag_data_cnt_ = num_data_;
+    is_use_subset_ = false;
+    balanced_bagging_ = false;
+    need_resize_gradients_ = false;
+    num_queries_ = train_data->metadata().num_queries();
+    query_boundaries_ = train_data->metadata().query_boundaries();
   }
 
   ~BaggingSampleStrategy() {}
@@ -205,8 +214,16 @@ class BaggingSampleStrategy : public SampleStrategy {
         need_resize_gradients_ = true;
       }
     } else {
+      need_re_bagging_ = false;
+      balanced_bagging_ = false;
+      need_resize_gradients_ = false;
       bag_data_cnt_ = num_data_;
+      num_sampled_queries_ = 0;
       bag_data_indices_.clear();
+      sampled_query_boundaries_.clear();
+      sampled_query_boundaries_thread_buffer_.clear();
+      bag_query_indices_.clear();
+      bagging_rands_.clear();
       #ifdef USE_CUDA
       cuda_bag_data_indices_.Clear();
       #endif  // USE_CUDA
@@ -225,6 +242,60 @@ class BaggingSampleStrategy : public SampleStrategy {
 
   const data_size_t* sampled_query_indices() const override {
     return bag_query_indices_.data();
+  }
+
+  std::string SnapshotState() const override {
+    SnapshotWriter writer;
+    writer.WriteBool(need_re_bagging_);
+    writer.WriteBool(is_use_subset_);
+    writer.WriteBool(balanced_bagging_);
+    writer.WriteBool(need_resize_gradients_);
+    writer.WriteScalar<data_size_t>(bag_data_cnt_);
+    writer.WriteScalar<data_size_t>(num_sampled_queries_);
+    writer.WriteVector(bag_data_indices_);
+    writer.WriteVector(sampled_query_boundaries_);
+    writer.WriteVector(sampled_query_boundaries_thread_buffer_);
+    writer.WriteVector(bag_query_indices_);
+    std::vector<unsigned int> rand_states(bagging_rands_.size(), 0);
+    for (size_t i = 0; i < bagging_rands_.size(); ++i) {
+      rand_states[i] = bagging_rands_[i].State();
+    }
+    writer.WriteVector(rand_states);
+    return writer.Take();
+  }
+
+  void LoadSnapshotState(const std::string& state, TreeLearner* tree_learner) override {
+    SnapshotReader reader(state);
+    need_re_bagging_ = reader.ReadBool();
+    is_use_subset_ = reader.ReadBool();
+    balanced_bagging_ = reader.ReadBool();
+    need_resize_gradients_ = reader.ReadBool();
+    bag_data_cnt_ = reader.ReadScalar<data_size_t>();
+    num_sampled_queries_ = reader.ReadScalar<data_size_t>();
+    bag_data_indices_ = reader.ReadVector<data_size_t, Common::AlignmentAllocator<data_size_t, kAlignedSize>>();
+    sampled_query_boundaries_ = reader.ReadVector<data_size_t>();
+    sampled_query_boundaries_thread_buffer_ = reader.ReadVector<data_size_t>();
+    bag_query_indices_ = reader.ReadVector<data_size_t, Common::AlignmentAllocator<data_size_t, kAlignedSize>>();
+    const auto rand_states = reader.ReadVector<unsigned int>();
+    if (!reader.IsConsumed()) {
+      Log::Fatal("Snapshot bagging state is corrupted");
+    }
+    if (rand_states.size() != bagging_rands_.size()) {
+      Log::Fatal("Snapshot bagging RNG state does not match the current configuration");
+    }
+    for (size_t i = 0; i < rand_states.size(); ++i) {
+      bagging_rands_[i].SetState(rand_states[i]);
+    }
+    if (!need_re_bagging_) {
+      if (!is_use_subset_) {
+        const data_size_t* used_indices = bag_data_cnt_ < num_data_ ? bag_data_indices_.data() : nullptr;
+        tree_learner->SetBaggingData(nullptr, used_indices, bag_data_cnt_);
+      } else {
+        tmp_subset_->ReSize(bag_data_cnt_);
+        tmp_subset_->CopySubrow(train_data_, bag_data_indices_.data(), bag_data_cnt_, false);
+        tree_learner->SetBaggingData(tmp_subset_.get(), bag_data_indices_.data(), bag_data_cnt_);
+      }
+    }
   }
 
  private:

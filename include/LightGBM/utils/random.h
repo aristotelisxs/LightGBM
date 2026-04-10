@@ -33,6 +33,14 @@ class Random {
   explicit Random(int seed) {
     x = seed;
   }
+
+  inline unsigned int State() const {
+    return x;
+  }
+
+  inline void SetState(unsigned int state) {
+    x = state;
+  }
   /*!
   * \brief Generate random integer, int16 range. [0, 65536]
   * \param lower_bound lower bound

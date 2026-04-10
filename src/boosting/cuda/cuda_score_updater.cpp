@@ -88,6 +88,25 @@ inline void CUDAScoreUpdater::MultiplyScore(double val, int cur_tree_id) {
   }
 }
 
+std::vector<double> CUDAScoreUpdater::ScoreSnapshot() const {
+  if (!boosting_on_cuda_) {
+    return score_;
+  }
+  std::vector<double> scores(cuda_score_.Size());
+  CopyFromCUDADeviceToHost<double>(scores.data(), cuda_score_.RawData(), scores.size(), __FILE__, __LINE__);
+  return scores;
+}
+
+void CUDAScoreUpdater::LoadScoreSnapshot(const std::vector<double>& scores) {
+  if (scores.size() != cuda_score_.Size()) {
+    Log::Fatal("Snapshot score buffer does not match the dataset shape");
+  }
+  CopyFromHostToCUDADevice<double>(cuda_score_.RawData(), scores.data(), scores.size(), __FILE__, __LINE__);
+  if (!boosting_on_cuda_) {
+    score_ = scores;
+  }
+}
+
 }  // namespace LightGBM
 
 #endif  // USE_CUDA

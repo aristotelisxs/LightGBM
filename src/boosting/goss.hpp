@@ -14,6 +14,8 @@
 #include <string>
 #include <vector>
 
+#include "../io/snapshot_serde.hpp"
+
 namespace LightGBM {
 
 class GOSSStrategy : public SampleStrategy {
@@ -113,6 +115,40 @@ class GOSSStrategy : public SampleStrategy {
 
   bool IsHessianChange() const override {
     return true;
+  }
+
+  std::string SnapshotState() const override {
+    SnapshotWriter writer;
+    writer.WriteBool(is_use_subset_);
+    writer.WriteBool(balanced_bagging_);
+    writer.WriteBool(need_resize_gradients_);
+    writer.WriteScalar<data_size_t>(bag_data_cnt_);
+    writer.WriteVector(bag_data_indices_);
+    std::vector<unsigned int> rand_states(bagging_rands_.size(), 0);
+    for (size_t i = 0; i < bagging_rands_.size(); ++i) {
+      rand_states[i] = bagging_rands_[i].State();
+    }
+    writer.WriteVector(rand_states);
+    return writer.Take();
+  }
+
+  void LoadSnapshotState(const std::string& state, TreeLearner* /*tree_learner*/) override {
+    SnapshotReader reader(state);
+    is_use_subset_ = reader.ReadBool();
+    balanced_bagging_ = reader.ReadBool();
+    need_resize_gradients_ = reader.ReadBool();
+    bag_data_cnt_ = reader.ReadScalar<data_size_t>();
+    bag_data_indices_ = reader.ReadVector<data_size_t, Common::AlignmentAllocator<data_size_t, kAlignedSize>>();
+    const auto rand_states = reader.ReadVector<unsigned int>();
+    if (!reader.IsConsumed()) {
+      Log::Fatal("Snapshot GOSS state is corrupted");
+    }
+    if (rand_states.size() != bagging_rands_.size()) {
+      Log::Fatal("Snapshot GOSS RNG state does not match the current configuration");
+    }
+    for (size_t i = 0; i < rand_states.size(); ++i) {
+      bagging_rands_[i].SetState(rand_states[i]);
+    }
   }
 
  private:

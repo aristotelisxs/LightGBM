@@ -260,6 +260,8 @@ const std::unordered_set<std::string>& Config::parameter_set() {
   "output_model",
   "saved_feature_importance_type",
   "snapshot_freq",
+  "save_snapshot",
+  "snapshot_path",
   "use_quantized_grad",
   "num_grad_quant_bins",
   "quant_train_renew_leaf",
@@ -512,6 +514,10 @@ void Config::GetMembersFromString(const std::unordered_map<std::string, std::str
   GetInt(params, "saved_feature_importance_type", &saved_feature_importance_type);
 
   GetInt(params, "snapshot_freq", &snapshot_freq);
+
+  GetBool(params, "save_snapshot", &save_snapshot);
+
+  GetString(params, "snapshot_path", &snapshot_path);
 
   GetBool(params, "use_quantized_grad", &use_quantized_grad);
 
@@ -873,6 +879,8 @@ const std::unordered_map<std::string, std::vector<std::string>>& Config::paramet
     {"output_model", {"model_output", "model_out"}},
     {"saved_feature_importance_type", {}},
     {"snapshot_freq", {"save_period"}},
+    {"save_snapshot", {}},
+    {"snapshot_path", {}},
     {"use_quantized_grad", {}},
     {"num_grad_quant_bins", {}},
     {"quant_train_renew_leaf", {}},
@@ -1019,6 +1027,8 @@ const std::unordered_map<std::string, std::string>& Config::ParameterTypes() {
     {"output_model", "string"},
     {"saved_feature_importance_type", "int"},
     {"snapshot_freq", "int"},
+    {"save_snapshot", "bool"},
+    {"snapshot_path", "string"},
     {"use_quantized_grad", "bool"},
     {"num_grad_quant_bins", "int"},
     {"quant_train_renew_leaf", "bool"},

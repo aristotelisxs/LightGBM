@@ -138,6 +138,56 @@ def test_booster_rollback_one_iter(rng):
     assert bst.num_trees() == num_iterations - 2
 
 
+def test_booster_snapshot_roundtrip(tmp_path, rng):
+    X = rng.uniform(size=(200, 8))
+    y = rng.normal(size=(200,))
+    X_valid = rng.uniform(size=(40, 8))
+    y_valid = rng.normal(size=(40,))
+
+    train_data = lgb.Dataset(X, label=y, free_raw_data=False)
+    valid_data = train_data.create_valid(X_valid, label=y_valid)
+    params = {
+        "objective": "regression",
+        "metric": "l2",
+        "verbose": -1,
+        "num_threads": 1,
+        "feature_fraction": 0.75,
+        "feature_fraction_seed": 13,
+        "extra_trees": True,
+        "extra_seed": 17,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 2,
+        "bagging_seed": 19,
+    }
+
+    baseline = lgb.Booster(params, train_data)
+    baseline.add_valid(valid_data, "valid")
+    for _ in range(6):
+        baseline.update()
+
+    snapshot_path = tmp_path / "train.snapshot"
+    baseline.save_snapshot(snapshot_path)
+
+    resumed = lgb.Booster(params, train_data)
+    resumed.add_valid(valid_data, "valid")
+    resumed.load_snapshot(snapshot_path)
+
+    assert resumed.current_training_iteration() == 6
+    assert resumed.current_iteration() == 6
+    np.testing.assert_allclose(
+        [score[2] for score in baseline.eval_valid()],
+        [score[2] for score in resumed.eval_valid()],
+    )
+
+    baseline.update()
+    resumed.update()
+
+    assert baseline.current_training_iteration() == 7
+    assert resumed.current_training_iteration() == 7
+    assert baseline.current_iteration() == resumed.current_iteration()
+    assert baseline.model_to_string() == resumed.model_to_string()
+
+
 class NumpySequence(lgb.Sequence):
     def __init__(self, ndarray, batch_size):
         self.ndarray = ndarray

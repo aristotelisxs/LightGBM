@@ -802,6 +802,16 @@ class Booster {
                                         num_iteration, feature_importance_type);
   }
 
+  void SaveTrainingSnapshot(const char* filename) const {
+    UNIQUE_LOCK(mutex_)
+    boosting_->SaveTrainingSnapshot(filename);
+  }
+
+  void LoadTrainingSnapshot(const char* filename) {
+    UNIQUE_LOCK(mutex_)
+    boosting_->LoadTrainingSnapshot(filename);
+  }
+
   std::string DumpModel(int start_iteration, int num_iteration,
                         int feature_importance_type) const {
     return boosting_->DumpModel(start_iteration, num_iteration,
@@ -2124,6 +2134,13 @@ int LGBM_BoosterGetCurrentIteration(BoosterHandle handle, int* out_iteration) {
   API_END();
 }
 
+int LGBM_BoosterGetCurrentTrainingIteration(BoosterHandle handle, int* out_iteration) {
+  API_BEGIN();
+  Booster* ref_booster = reinterpret_cast<Booster*>(handle);
+  *out_iteration = ref_booster->GetBoosting()->GetCurrentTrainingIteration();
+  API_END();
+}
+
 int LGBM_BoosterNumModelPerIteration(BoosterHandle handle, int* out_tree_per_iteration) {
   API_BEGIN();
   Booster* ref_booster = reinterpret_cast<Booster*>(handle);
@@ -2694,6 +2711,20 @@ int LGBM_BoosterSaveModelToString(BoosterHandle handle,
   if (*out_len <= buffer_len) {
     std::memcpy(out_str, model.c_str(), *out_len);
   }
+  API_END();
+}
+
+int LGBM_BoosterSaveSnapshot(BoosterHandle handle, const char* filename) {
+  API_BEGIN();
+  Booster* ref_booster = reinterpret_cast<Booster*>(handle);
+  ref_booster->SaveTrainingSnapshot(filename);
+  API_END();
+}
+
+int LGBM_BoosterLoadSnapshot(BoosterHandle handle, const char* filename) {
+  API_BEGIN();
+  Booster* ref_booster = reinterpret_cast<Booster*>(handle);
+  ref_booster->LoadTrainingSnapshot(filename);
   API_END();
 }
 

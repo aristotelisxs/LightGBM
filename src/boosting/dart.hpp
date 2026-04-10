@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "gbdt.h"
+#include "../io/snapshot_serde.hpp"
 #include "score_updater.hpp"
 
 namespace LightGBM {
@@ -92,6 +93,30 @@ class DART: public GBDT {
   }
 
  private:
+  std::string SnapshotTrainingState() const override {
+    SnapshotWriter writer;
+    writer.WriteString(GBDT::SnapshotTrainingState());
+    writer.WriteVector(tree_weight_);
+    writer.WriteScalar<double>(sum_weight_);
+    writer.WriteVector(drop_index_);
+    writer.WriteScalar<unsigned int>(random_for_drop_.State());
+    writer.WriteBool(is_update_score_cur_iter_);
+    return writer.Take();
+  }
+
+  void LoadSnapshotTrainingState(const std::string& state) override {
+    SnapshotReader reader(state);
+    GBDT::LoadSnapshotTrainingState(reader.ReadString());
+    tree_weight_ = reader.ReadVector<double>();
+    sum_weight_ = reader.ReadScalar<double>();
+    drop_index_ = reader.ReadVector<int>();
+    random_for_drop_.SetState(reader.ReadScalar<unsigned int>());
+    is_update_score_cur_iter_ = reader.ReadBool();
+    if (!reader.IsConsumed()) {
+      Log::Fatal("Snapshot DART state is corrupted");
+    }
+  }
+
   /*!
   * \brief drop trees based on drop_rate
   */

@@ -13,6 +13,8 @@
 #include <LightGBM/utils/threading.h>
 
 #include <random>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include "data_partition.hpp"
@@ -88,6 +90,28 @@ class GradientDiscretizer {
 
   int32_t* GetChangeHistBitsBuffer(const int feature_index) {
     return change_hist_bits_buffer_[feature_index].data();
+  }
+
+  std::string RandomEngineState() const {
+    std::ostringstream oss;
+    oss << random_values_use_start_eng_;
+    return oss.str();
+  }
+
+  void SetRandomEngineState(const std::string& state) {
+    std::istringstream iss(state);
+    iss >> random_values_use_start_eng_;
+    if (iss.fail()) {
+      Log::Fatal("Snapshot gradient discretizer RNG state is corrupted");
+    }
+  }
+
+  int current_iteration() const {
+    return iter_;
+  }
+
+  void set_current_iteration(int iter) {
+    iter_ = iter;
   }
 
  protected:

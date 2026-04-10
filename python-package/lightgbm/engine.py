@@ -220,6 +220,21 @@ def train(
     if num_boost_round <= 0:
         raise ValueError(f"Number of boosting rounds must be greater than 0. Got {num_boost_round}.")
 
+    save_snapshot = bool(params.get("save_snapshot", False))
+    snapshot_path = params.get("snapshot_path")
+    snapshot_freq = int(params.get("snapshot_freq", -1))
+    if save_snapshot:
+        if snapshot_path in (None, ""):
+            raise ValueError("snapshot_path must be set when save_snapshot=True.")
+        if snapshot_freq <= 0:
+            raise ValueError("snapshot_freq must be greater than 0 when save_snapshot=True.")
+        snapshot_path = str(snapshot_path)
+        params["snapshot_path"] = snapshot_path
+    resume_snapshot = bool(save_snapshot and Path(snapshot_path).exists())
+    if resume_snapshot and init_model is not None:
+        _log_warning("Ignoring init_model because snapshot_path already exists and will be resumed instead.")
+        init_model = None
+
     # setting early stopping via global params should be possible
     params = _choose_param_value(
         main_param_name="early_stopping_round",
@@ -292,6 +307,9 @@ def train(
     callbacks_before_iter = sorted(callbacks_before_iter_set, key=attrgetter("order"))
     callbacks_after_iter = sorted(callbacks_after_iter_set, key=attrgetter("order"))
 
+    if save_snapshot and any(isinstance(cb, callback._EarlyStoppingCallback) for cb in callbacks_set):
+        raise ValueError("save_snapshot is not compatible with Python early_stopping callbacks.")
+
     # construct booster
     try:
         booster = Booster(params=params, train_set=train_set)
@@ -299,29 +317,45 @@ def train(
             booster.set_train_data_name(train_data_name)
         for valid_set, name_valid_set in zip(reduced_valid_sets, name_valid_sets):
             booster.add_valid(valid_set, name_valid_set)
+        if resume_snapshot:
+            booster.load_snapshot(snapshot_path)
     finally:
         train_set._reverse_update_params()
         for valid_set in reduced_valid_sets:
             valid_set._reverse_update_params()
     booster.best_iteration = 0
 
+    if save_snapshot:
+        train_begin_iteration = 0
+        train_end_iteration = num_boost_round
+        loop_start_iteration = booster.current_training_iteration()
+        if loop_start_iteration > num_boost_round:
+            raise ValueError(
+                f"Snapshot iteration {loop_start_iteration} exceeds num_boost_round={num_boost_round}."
+            )
+    else:
+        train_begin_iteration = init_iteration
+        train_end_iteration = init_iteration + num_boost_round
+        loop_start_iteration = init_iteration
+
     # start training
-    for i in range(init_iteration, init_iteration + num_boost_round):
+    evaluation_result_list: List[_LGBM_BoosterEvalMethodResultType] = []
+    for i in range(loop_start_iteration, train_end_iteration):
         for cb in callbacks_before_iter:
             cb(
                 callback.CallbackEnv(
                     model=booster,
                     params=params,
                     iteration=i,
-                    begin_iteration=init_iteration,
-                    end_iteration=init_iteration + num_boost_round,
+                    begin_iteration=train_begin_iteration,
+                    end_iteration=train_end_iteration,
                     evaluation_result_list=None,
                 )
             )
 
         booster.update(fobj=fobj)
 
-        evaluation_result_list: List[_LGBM_BoosterEvalMethodResultType] = []
+        evaluation_result_list = []
         # check evaluation result.
         if valid_sets is not None:
             if is_valid_contain_train:
@@ -334,8 +368,8 @@ def train(
                         model=booster,
                         params=params,
                         iteration=i,
-                        begin_iteration=init_iteration,
-                        end_iteration=init_iteration + num_boost_round,
+                        begin_iteration=train_begin_iteration,
+                        end_iteration=train_end_iteration,
                         evaluation_result_list=evaluation_result_list,
                     )
                 )
@@ -345,6 +379,8 @@ def train(
             # which is not needed for early stopping
             evaluation_result_list = [item[:4] for item in earlyStopException.best_score]
             break
+        if save_snapshot and booster.current_training_iteration() % snapshot_freq == 0:
+            booster.save_snapshot(snapshot_path)
     booster.best_score = defaultdict(OrderedDict)
     for dataset_name, metric_name, metric_value, _ in evaluation_result_list:
         booster.best_score[dataset_name][metric_name] = metric_value

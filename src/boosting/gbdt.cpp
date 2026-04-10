@@ -24,9 +24,60 @@
 #include <utility>
 #include <vector>
 
+#include "../io/snapshot_manager.hpp"
+#include "../io/snapshot_serde.hpp"
+
 namespace LightGBM {
 
 Common::Timer global_timer;
+
+namespace {
+
+const char kSnapshotMagic[] = "LGBMSNP";
+const uint32_t kSnapshotVersion = 2;
+
+template <typename T>
+void WriteNestedVector(SnapshotWriter* writer, const std::vector<std::vector<T>>& values) {
+  writer->WriteScalar<uint64_t>(static_cast<uint64_t>(values.size()));
+  for (const auto& inner : values) {
+    writer->WriteVector(inner);
+  }
+}
+
+template <typename T>
+std::vector<std::vector<T>> ReadNestedVector(SnapshotReader* reader) {
+  const auto outer_size = reader->ReadScalar<uint64_t>();
+  std::vector<std::vector<T>> values(static_cast<size_t>(outer_size));
+  for (size_t i = 0; i < values.size(); ++i) {
+    values[i] = reader->ReadVector<T>();
+  }
+  return values;
+}
+
+void WriteNestedStringVector(SnapshotWriter* writer, const std::vector<std::vector<std::string>>& values) {
+  writer->WriteScalar<uint64_t>(static_cast<uint64_t>(values.size()));
+  for (const auto& inner : values) {
+    writer->WriteScalar<uint64_t>(static_cast<uint64_t>(inner.size()));
+    for (const auto& value : inner) {
+      writer->WriteString(value);
+    }
+  }
+}
+
+std::vector<std::vector<std::string>> ReadNestedStringVector(SnapshotReader* reader) {
+  const auto outer_size = reader->ReadScalar<uint64_t>();
+  std::vector<std::vector<std::string>> values(static_cast<size_t>(outer_size));
+  for (auto& inner : values) {
+    const auto inner_size = reader->ReadScalar<uint64_t>();
+    inner.resize(static_cast<size_t>(inner_size));
+    for (auto& value : inner) {
+      value = reader->ReadString();
+    }
+  }
+  return values;
+}
+
+}  // namespace
 
 int LGBM_config_::current_device = lgbm_device_cpu;
 int LGBM_config_::current_learner = use_cpu_learner;
@@ -43,6 +94,7 @@ GBDT::GBDT()
       num_tree_per_iteration_(1),
       num_class_(1),
       num_iteration_for_pred_(0),
+      start_iteration_for_pred_(0),
       shrinkage_rate_(0.1f),
       num_init_iteration_(0) {
   average_output_ = false;
@@ -69,9 +121,11 @@ void GBDT::Init(const Config* config, const Dataset* train_data, const Objective
   }
   iter_ = 0;
   num_iteration_for_pred_ = 0;
+  start_iteration_for_pred_ = 0;
   max_feature_idx_ = 0;
   num_class_ = config->num_class;
   config_ = std::unique_ptr<Config>(new Config(*config));
+  snapshot_reference_config_ = config_->ToString();
   early_stopping_round_ = config_->early_stopping_round;
   early_stopping_min_delta_ = config->early_stopping_min_delta;
   es_first_metric_only_ = config_->first_metric_only;
@@ -120,6 +174,7 @@ void GBDT::Init(const Config* config, const Dataset* train_data, const Objective
 
   // push training metrics
   training_metrics_.clear();
+  valid_data_.clear();
   for (const auto& metric : training_metrics) {
     training_metrics_.push_back(metric);
   }
@@ -209,6 +264,7 @@ void GBDT::AddValidDataset(const Dataset* valid_data,
     }
   }
   valid_score_updater_.push_back(std::move(new_score_updater));
+  valid_data_.push_back(valid_data);
   valid_metrics_.emplace_back();
   for (const auto& metric : valid_metrics) {
     valid_metrics_.back().push_back(metric);
@@ -247,7 +303,7 @@ void GBDT::Train(int snapshot_freq, const std::string& model_output_path) {
   Common::FunctionTimer fun_timer("GBDT::Train", global_timer);
   bool is_finished = false;
   auto start_time = std::chrono::steady_clock::now();
-  for (int iter = 0; iter < config_->num_iterations && !is_finished; ++iter) {
+  for (int iter = iter_; iter < config_->num_iterations && !is_finished; ++iter) {
     is_finished = TrainOneIter(nullptr, nullptr);
     if (!is_finished) {
       is_finished = EvalAndCheckEarlyStopping();
@@ -256,7 +312,13 @@ void GBDT::Train(int snapshot_freq, const std::string& model_output_path) {
     // output used time per iteration
     Log::Info("%f seconds elapsed, finished iteration %d", std::chrono::duration<double,
               std::milli>(end_time - start_time) * 1e-3, iter + 1);
-    if (snapshot_freq > 0
+    if (config_->save_snapshot && config_->snapshot_freq > 0
+        && (iter + 1) % config_->snapshot_freq == 0) {
+      if (config_->snapshot_path.empty()) {
+        Log::Fatal("save_snapshot=true requires snapshot_path to be set");
+      }
+      SaveTrainingSnapshot(config_->snapshot_path.c_str());
+    } else if (snapshot_freq > 0
         && (iter + 1) % snapshot_freq == 0) {
       std::string snapshot_out = model_output_path + ".snapshot_iter_" + std::to_string(iter + 1);
       SaveModelToFile(0, -1, config_->saved_feature_importance_type, snapshot_out.c_str());
@@ -277,7 +339,7 @@ void GBDT::RefitTree(const int* tree_leaf_prediction, const size_t nrow, const s
     for (int i = 0; i < static_cast<int>(nrow); ++i) {
       int tid = omp_get_thread_num();
       for (size_t j = 0; j < ncol; ++j) {
-        max_leaves_by_thread[tid] = std::max(max_leaves_by_thread[tid], tree_leaf_prediction[i * ncol + j]);
+        max_leaves_by_thread[tid] = (std::max)(max_leaves_by_thread[tid], tree_leaf_prediction[i * ncol + j]);
       }
     }
     int max_leaves = *std::max_element(max_leaves_by_thread.begin(), max_leaves_by_thread.end());
@@ -495,6 +557,7 @@ bool GBDT::EvalAndCheckEarlyStopping() {
     for (int i = 0; i < early_stopping_round_ * num_tree_per_iteration_; ++i) {
       models_.pop_back();
     }
+    iter_ = static_cast<int>(models_.size()) / num_tree_per_iteration_ - num_init_iteration_;
   }
   return is_met_early_stopping;
 }
@@ -885,6 +948,168 @@ void GBDT::ResetGradientBuffers() {
     gradients_pointer_ = gradients_.data();
     hessians_pointer_ = hessians_.data();
   }
+}
+
+std::string GBDT::SnapshotTrainingState() const {
+  SnapshotWriter writer;
+  writer.WriteScalar<int>(iter_);
+  writer.WriteScalar<int>(num_init_iteration_);
+  writer.WriteScalar<int>(num_iteration_for_pred_);
+  writer.WriteScalar<int>(start_iteration_for_pred_);
+  writer.WriteScalar<double>(shrinkage_rate_);
+  std::vector<uint8_t> class_need_train(class_need_train_.size(), 0);
+  for (size_t i = 0; i < class_need_train_.size(); ++i) {
+    class_need_train[i] = class_need_train_[i] ? 1 : 0;
+  }
+  writer.WriteVector(class_need_train);
+  WriteNestedVector(&writer, best_iter_);
+  WriteNestedVector(&writer, best_score_);
+  WriteNestedStringVector(&writer, best_msg_);
+  writer.WriteString(tree_learner_->SnapshotState());
+  writer.WriteString(data_sample_strategy_->SnapshotState());
+  return writer.Take();
+}
+
+void GBDT::LoadSnapshotTrainingState(const std::string& state) {
+  SnapshotReader reader(state);
+  iter_ = reader.ReadScalar<int>();
+  num_init_iteration_ = reader.ReadScalar<int>();
+  num_iteration_for_pred_ = reader.ReadScalar<int>();
+  start_iteration_for_pred_ = reader.ReadScalar<int>();
+  shrinkage_rate_ = reader.ReadScalar<double>();
+  const auto class_need_train = reader.ReadVector<uint8_t>();
+  class_need_train_.assign(class_need_train.size(), false);
+  for (size_t i = 0; i < class_need_train.size(); ++i) {
+    class_need_train_[i] = class_need_train[i] != 0;
+  }
+  best_iter_ = ReadNestedVector<int>(&reader);
+  best_score_ = ReadNestedVector<double>(&reader);
+  best_msg_ = ReadNestedStringVector(&reader);
+  tree_learner_->LoadSnapshotState(reader.ReadString());
+  data_sample_strategy_->LoadSnapshotState(reader.ReadString(), tree_learner_.get());
+  if (!reader.IsConsumed()) {
+    Log::Fatal("Snapshot training state is corrupted");
+  }
+}
+
+void GBDT::RestoreScoreUpdaters(const std::vector<double>& train_scores,
+                                const std::vector<std::vector<double>>& valid_scores) {
+  #ifdef USE_CUDA
+  if (config_->device_type == std::string("cuda")) {
+    train_score_updater_.reset(new CUDAScoreUpdater(train_data_, num_tree_per_iteration_, boosting_on_gpu_));
+  } else {
+  #endif  // USE_CUDA
+    train_score_updater_.reset(new ScoreUpdater(train_data_, num_tree_per_iteration_));
+  #ifdef USE_CUDA
+  }
+  #endif  // USE_CUDA
+  train_score_updater_->LoadScoreSnapshot(train_scores);
+
+  valid_score_updater_.clear();
+  valid_score_updater_.reserve(valid_data_.size());
+  if (valid_scores.size() != valid_data_.size()) {
+    Log::Fatal("Snapshot validation score buffers do not match the current training configuration");
+  }
+  for (const auto* valid_data : valid_data_) {
+    auto new_score_updater =
+      #ifdef USE_CUDA
+      config_->device_type == std::string("cuda") ?
+      std::unique_ptr<CUDAScoreUpdater>(new CUDAScoreUpdater(valid_data, num_tree_per_iteration_,
+        objective_function_ != nullptr && objective_function_->IsCUDAObjective())) :
+      #endif  // USE_CUDA
+      std::unique_ptr<ScoreUpdater>(new ScoreUpdater(valid_data, num_tree_per_iteration_));
+    valid_score_updater_.push_back(std::move(new_score_updater));
+  }
+  for (size_t i = 0; i < valid_score_updater_.size(); ++i) {
+    valid_score_updater_[i]->LoadScoreSnapshot(valid_scores[i]);
+  }
+}
+
+bool GBDT::SaveTrainingSnapshot(const char* filename) const {
+  if (filename == nullptr || filename[0] == '\0') {
+    Log::Fatal("Snapshot path must not be empty");
+  }
+  if (Network::num_machines() > 1) {
+    Log::Fatal("Training snapshots are not supported for distributed training");
+  }
+  if (objective_function_ != nullptr) {
+    const auto objective_name = std::string(objective_function_->GetName());
+    if (objective_name == std::string("lambdarank") || objective_name == std::string("rank_xendcg")) {
+      Log::Fatal("Training snapshots are not supported for ranking objectives");
+    }
+  }
+
+  SnapshotWriter writer;
+  writer.WriteString(kSnapshotMagic);
+  writer.WriteScalar<uint32_t>(kSnapshotVersion);
+  writer.WriteString(snapshot_reference_config_);
+  writer.WriteScalar<data_size_t>(train_data_->num_data());
+  writer.WriteScalar<int>(max_feature_idx_);
+  writer.WriteScalar<uint64_t>(static_cast<uint64_t>(valid_data_.size()));
+  writer.WriteString(SaveModelToString(0, -1, config_->saved_feature_importance_type));
+  writer.WriteString(SnapshotTrainingState());
+  writer.WriteVector(train_score_updater_->ScoreSnapshot());
+  std::vector<std::vector<double>> valid_scores;
+  valid_scores.reserve(valid_score_updater_.size());
+  for (const auto& score_updater : valid_score_updater_) {
+    valid_scores.push_back(score_updater->ScoreSnapshot());
+  }
+  WriteNestedVector(&writer, valid_scores);
+  return SnapshotManager::WriteAtomic(filename, writer.Take());
+}
+
+bool GBDT::LoadTrainingSnapshot(const char* filename) {
+  if (filename == nullptr || filename[0] == '\0') {
+    Log::Fatal("Snapshot path must not be empty");
+  }
+  if (Network::num_machines() > 1) {
+    Log::Fatal("Training snapshots are not supported for distributed training");
+  }
+  if (objective_function_ != nullptr) {
+    const auto objective_name = std::string(objective_function_->GetName());
+    if (objective_name == std::string("lambdarank") || objective_name == std::string("rank_xendcg")) {
+      Log::Fatal("Training snapshots are not supported for ranking objectives");
+    }
+  }
+
+  const std::string snapshot_buffer = SnapshotManager::Read(filename);
+  SnapshotReader reader(snapshot_buffer);
+  if (reader.ReadString() != std::string(kSnapshotMagic)) {
+    Log::Fatal("Snapshot file %s has an invalid header", filename);
+  }
+  if (reader.ReadScalar<uint32_t>() != kSnapshotVersion) {
+    Log::Fatal("Snapshot file %s has an unsupported version", filename);
+  }
+  const auto snapshot_config = reader.ReadString();
+  if (snapshot_config != snapshot_reference_config_) {
+    Log::Fatal("Snapshot parameters do not match the current training configuration");
+  }
+  if (reader.ReadScalar<data_size_t>() != train_data_->num_data()) {
+    Log::Fatal("Snapshot training data does not match the current training data");
+  }
+  if (reader.ReadScalar<int>() != max_feature_idx_) {
+    Log::Fatal("Snapshot feature metadata does not match the current training data");
+  }
+  if (reader.ReadScalar<uint64_t>() != static_cast<uint64_t>(valid_data_.size())) {
+    Log::Fatal("Snapshot validation data count does not match the current training configuration");
+  }
+  const std::string model_string = reader.ReadString();
+  const std::string training_state = reader.ReadString();
+  const auto train_scores = reader.ReadVector<double>();
+  const auto valid_scores = ReadNestedVector<double>(&reader);
+  if (!reader.IsConsumed()) {
+    Log::Fatal("Snapshot file %s is corrupted", filename);
+  }
+  std::unique_ptr<LightGBM::Boosting> snapshot_model(
+      LightGBM::Boosting::CreateBoosting(config_->boosting, nullptr, config_->device_type, config_->num_gpu));
+  if (snapshot_model == nullptr || !snapshot_model->LoadModelFromString(model_string.c_str(), model_string.size())) {
+    Log::Fatal("Failed to load model state from snapshot file %s", filename);
+  }
+  models_.clear();
+  MergeFrom(snapshot_model.get());
+  LoadSnapshotTrainingState(training_state);
+  RestoreScoreUpdaters(train_scores, valid_scores);
+  return true;
 }
 
 }  // namespace LightGBM

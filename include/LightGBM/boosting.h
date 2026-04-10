@@ -96,6 +96,11 @@ class LIGHTGBM_EXPORT Boosting {
   virtual int GetCurrentIteration() const = 0;
 
   /*!
+  * \brief return the current training iteration within the active training session
+  */
+  virtual int GetCurrentTrainingIteration() const = 0;
+
+  /*!
   * \brief Get evaluation result at data_idx data
   * \param data_idx 0: training data, 1: 1st validation data
   * \return evaluation result
@@ -223,6 +228,10 @@ class LIGHTGBM_EXPORT Boosting {
   * \return true if succeeded
   */
   virtual bool LoadModelFromString(const char* buffer, size_t len) = 0;
+
+  virtual bool SaveTrainingSnapshot(const char* filename) const = 0;
+
+  virtual bool LoadTrainingSnapshot(const char* filename) = 0;
 
   /*!
   * \brief Calculate feature importances

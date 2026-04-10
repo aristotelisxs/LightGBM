@@ -19,6 +19,8 @@
 #include <memory>
 #include <vector>
 
+#include "../../io/snapshot_serde.hpp"
+
 namespace LightGBM {
 
 CUDASingleGPUTreeLearner::CUDASingleGPUTreeLearner(const Config* config, const bool boosting_on_cuda): SerialTreeLearner(config), boosting_on_cuda_(boosting_on_cuda) {}
@@ -526,6 +528,32 @@ Tree* CUDASingleGPUTreeLearner::FitByExistingTree(const Tree* old_tree, const st
     cuda_leaf_hessian_stat_buffer_.Resize(buffer_size);
   }
   return FitByExistingTree(old_tree, gradients, hessians);
+}
+
+std::string CUDASingleGPUTreeLearner::SnapshotState() const {
+  SnapshotWriter writer;
+  writer.WriteString(SerialTreeLearner::SnapshotState());
+  const bool has_cuda_gradient_discretizer = cuda_gradient_discretizer_ != nullptr;
+  writer.WriteBool(has_cuda_gradient_discretizer);
+  if (has_cuda_gradient_discretizer) {
+    writer.WriteScalar<int>(cuda_gradient_discretizer_->current_iteration());
+  }
+  return writer.Take();
+}
+
+void CUDASingleGPUTreeLearner::LoadSnapshotState(const std::string& state) {
+  SnapshotReader reader(state);
+  SerialTreeLearner::LoadSnapshotState(reader.ReadString());
+  const bool has_cuda_gradient_discretizer = reader.ReadBool();
+  if (has_cuda_gradient_discretizer != (cuda_gradient_discretizer_ != nullptr)) {
+    Log::Fatal("Snapshot CUDA quantized gradient state does not match the current configuration");
+  }
+  if (has_cuda_gradient_discretizer) {
+    cuda_gradient_discretizer_->set_current_iteration(reader.ReadScalar<int>());
+  }
+  if (!reader.IsConsumed()) {
+    Log::Fatal("Snapshot CUDA tree learner state is corrupted");
+  }
 }
 
 void CUDASingleGPUTreeLearner::ReduceLeafStat(

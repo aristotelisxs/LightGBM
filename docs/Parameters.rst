@@ -721,11 +721,21 @@ Learning Control Parameters
 
 -  ``snapshot_freq`` :raw-html:`<a id="snapshot_freq" title="Permalink to this parameter" href="#snapshot_freq">&#x1F517;&#xFE0E;</a>`, default = ``-1``, type = int, aliases: ``save_period``
 
-   -  frequency of saving model file snapshot
+   -  frequency of saving training snapshots
 
-   -  set this to positive value to enable this function. For example, the model file will be snapshotted at each iteration if ``snapshot_freq=1``
+   -  set this to a positive value to save a snapshot every ``snapshot_freq`` boosting rounds when ``save_snapshot=true``
 
-   -  **Note**: can be used only in CLI version
+   -  when ``save_snapshot=false``, CLI training keeps the legacy behavior of periodically writing model text snapshots
+
+-  ``save_snapshot`` :raw-html:`<a id="save_snapshot" title="Permalink to this parameter" href="#save_snapshot">&#x1F517;&#xFE0E;</a>`, default = ``false``, type = bool
+
+   -  whether to enable training snapshots that can be used to resume interrupted training
+
+-  ``snapshot_path`` :raw-html:`<a id="snapshot_path" title="Permalink to this parameter" href="#snapshot_path">&#x1F517;&#xFE0E;</a>`, default = ``""``, type = string
+
+   -  path of the snapshot file used for save / resume
+
+   -  in the Python package, this must be set explicitly when ``save_snapshot=true``
 
 -  ``use_quantized_grad`` :raw-html:`<a id="use_quantized_grad" title="Permalink to this parameter" href="#use_quantized_grad">&#x1F517;&#xFE0E;</a>`, default = ``false``, type = bool
 

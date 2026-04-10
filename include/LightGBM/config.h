@@ -618,10 +618,19 @@ struct Config {
 
   // [no-save]
   // alias = save_period
-  // desc = frequency of saving model file snapshot
-  // desc = set this to positive value to enable this function. For example, the model file will be snapshotted at each iteration if ``snapshot_freq=1``
-  // desc = **Note**: can be used only in CLI version
+  // desc = frequency of saving training snapshots
+  // desc = set this to a positive value to save a snapshot every ``snapshot_freq`` boosting rounds when ``save_snapshot=true``
+  // desc = when ``save_snapshot=false``, CLI training keeps the legacy behavior of periodically writing model text snapshots
   int snapshot_freq = -1;
+
+  // [no-save]
+  // desc = whether to enable training snapshots that can be used to resume interrupted training
+  bool save_snapshot = false;
+
+  // [no-save]
+  // desc = path of the snapshot file used for save / resume
+  // desc = in the Python package, this must be set explicitly when ``save_snapshot=true``
+  std::string snapshot_path = "";
 
   // desc = whether to use gradient quantization when training
   // desc = enabling this will discretize (quantize) the gradients and hessians into bins of ``num_grad_quant_bins``

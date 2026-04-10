@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "cost_effective_gradient_boosting.hpp"
+#include "../io/snapshot_serde.hpp"
 
 namespace LightGBM {
 
@@ -1069,6 +1070,36 @@ std::vector<int8_t> node_used_features = col_sampler_.GetByNode(tree, leaf);
   OMP_THROW_EX();
   auto best_idx = ArrayArgs<SplitInfo>::ArgMax(bests);
   *split = bests[best_idx];
+}
+
+std::string SerialTreeLearner::SnapshotState() const {
+  SnapshotWriter writer;
+  writer.WriteScalar<unsigned int>(col_sampler_.random_state());
+  writer.WriteVector(histogram_pool_.ExtraTreesRandomStates());
+  const bool has_gradient_discretizer = gradient_discretizer_ != nullptr;
+  writer.WriteBool(has_gradient_discretizer);
+  if (has_gradient_discretizer) {
+    writer.WriteScalar<int>(gradient_discretizer_->current_iteration());
+    writer.WriteString(gradient_discretizer_->RandomEngineState());
+  }
+  return writer.Take();
+}
+
+void SerialTreeLearner::LoadSnapshotState(const std::string& state) {
+  SnapshotReader reader(state);
+  col_sampler_.set_random_state(reader.ReadScalar<unsigned int>());
+  histogram_pool_.SetExtraTreesRandomStates(reader.ReadVector<unsigned int>());
+  const bool has_gradient_discretizer = reader.ReadBool();
+  if (has_gradient_discretizer != (gradient_discretizer_ != nullptr)) {
+    Log::Fatal("Snapshot quantized gradient state does not match the current configuration");
+  }
+  if (has_gradient_discretizer) {
+    gradient_discretizer_->set_current_iteration(reader.ReadScalar<int>());
+    gradient_discretizer_->SetRandomEngineState(reader.ReadString());
+  }
+  if (!reader.IsConsumed()) {
+    Log::Fatal("Snapshot tree learner state is corrupted");
+  }
 }
 
 #ifdef DEBUG
