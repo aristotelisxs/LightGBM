@@ -117,7 +117,7 @@ class GOSSStrategy : public SampleStrategy {
     return true;
   }
 
-  std::string SnapshotState() const override {
+  std::string SnapshotState() const {
     SnapshotWriter writer;
     writer.WriteBool(is_use_subset_);
     writer.WriteBool(balanced_bagging_);
@@ -132,7 +132,7 @@ class GOSSStrategy : public SampleStrategy {
     return writer.Take();
   }
 
-  void LoadSnapshotState(const std::string& state, TreeLearner* /*tree_learner*/) override {
+  void LoadSnapshotState(const std::string& state, TreeLearner* /*tree_learner*/) {
     SnapshotReader reader(state);
     is_use_subset_ = reader.ReadBool();
     balanced_bagging_ = reader.ReadBool();

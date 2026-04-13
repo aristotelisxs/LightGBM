@@ -244,7 +244,7 @@ class BaggingSampleStrategy : public SampleStrategy {
     return bag_query_indices_.data();
   }
 
-  std::string SnapshotState() const override {
+  std::string SnapshotState() const {
     SnapshotWriter writer;
     writer.WriteBool(need_re_bagging_);
     writer.WriteBool(is_use_subset_);
@@ -264,7 +264,7 @@ class BaggingSampleStrategy : public SampleStrategy {
     return writer.Take();
   }
 
-  void LoadSnapshotState(const std::string& state, TreeLearner* tree_learner) override {
+  void LoadSnapshotState(const std::string& state, TreeLearner* tree_learner) {
     SnapshotReader reader(state);
     need_re_bagging_ = reader.ReadBool();
     is_use_subset_ = reader.ReadBool();

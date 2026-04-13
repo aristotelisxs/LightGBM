@@ -33,6 +33,7 @@
 #include <utility>
 #include <vector>
 
+#include "boosting/gbdt.h"
 #include "application/predictor.hpp"
 #include <LightGBM/utils/yamc/alternate_shared_mutex.hpp>
 #include <LightGBM/utils/yamc/yamc_shared_lock.hpp>
@@ -804,12 +805,12 @@ class Booster {
 
   void SaveTrainingSnapshot(const char* filename) const {
     UNIQUE_LOCK(mutex_)
-    boosting_->SaveTrainingSnapshot(filename);
+    GetSnapshotBoosting()->SaveTrainingSnapshot(filename);
   }
 
   void LoadTrainingSnapshot(const char* filename) {
     UNIQUE_LOCK(mutex_)
-    boosting_->LoadTrainingSnapshot(filename);
+    GetSnapshotBoosting()->LoadTrainingSnapshot(filename);
   }
 
   std::string DumpModel(int start_iteration, int num_iteration,
@@ -889,6 +890,14 @@ class Booster {
   }
 
   const Boosting* GetBoosting() const { return boosting_.get(); }
+
+  const GBDT* GetSnapshotBoosting() const {
+    return GBDT::GetSnapshotBoosting(boosting_.get());
+  }
+
+  GBDT* GetSnapshotBoosting() {
+    return GBDT::GetSnapshotBoosting(boosting_.get());
+  }
 
  private:
   const Dataset* train_data_;
@@ -2137,7 +2146,7 @@ int LGBM_BoosterGetCurrentIteration(BoosterHandle handle, int* out_iteration) {
 int LGBM_BoosterGetCurrentTrainingIteration(BoosterHandle handle, int* out_iteration) {
   API_BEGIN();
   Booster* ref_booster = reinterpret_cast<Booster*>(handle);
-  *out_iteration = ref_booster->GetBoosting()->GetCurrentTrainingIteration();
+  *out_iteration = ref_booster->GetSnapshotBoosting()->GetCurrentTrainingIteration();
   API_END();
 }
 

@@ -26,6 +26,9 @@
 
 #include "../io/snapshot_manager.hpp"
 #include "../io/snapshot_serde.hpp"
+#include "../treelearner/serial_tree_learner.h"
+#include "bagging.hpp"
+#include "goss.hpp"
 
 namespace LightGBM {
 
@@ -34,7 +37,7 @@ Common::Timer global_timer;
 namespace {
 
 const char kSnapshotMagic[] = "LGBMSNP";
-const uint32_t kSnapshotVersion = 2;
+const uint32_t kSnapshotVersion = 3;
 
 template <typename T>
 void WriteNestedVector(SnapshotWriter* writer, const std::vector<std::vector<T>>& values) {
@@ -77,6 +80,53 @@ std::vector<std::vector<std::string>> ReadNestedStringVector(SnapshotReader* rea
   return values;
 }
 
+std::unique_ptr<ScoreUpdater> CreateScoreUpdater(const std::string& device_type,
+                                                 const Dataset* data,
+                                                 int num_tree_per_iteration,
+                                                 bool score_on_cuda) {
+#ifdef USE_CUDA
+  if (device_type == std::string("cuda")) {
+    return std::unique_ptr<ScoreUpdater>(new CUDAScoreUpdater(data, num_tree_per_iteration, score_on_cuda));
+  }
+#else
+  (void)device_type;
+  (void)score_on_cuda;
+#endif
+  return std::unique_ptr<ScoreUpdater>(new ScoreUpdater(data, num_tree_per_iteration));
+}
+
+bool ShouldIgnoreSnapshotConfigLine(const std::string& line) {
+  static const std::vector<std::string> kIgnoredSnapshotConfigPrefixes = {
+      "[verbosity:",
+      "[saved_feature_importance_type:",
+      "[output_model:",
+      "[snapshot_freq:",
+      "[save_snapshot:",
+      "[snapshot_path:",
+      "[output_result:",
+      "[convert_model_language:",
+      "[convert_model:",
+  };
+  return std::any_of(
+      kIgnoredSnapshotConfigPrefixes.begin(),
+      kIgnoredSnapshotConfigPrefixes.end(),
+      [&line](const std::string& prefix) { return line.rfind(prefix, 0) == 0; });
+}
+
+std::string SnapshotCompatibilityConfigString(const Config* config) {
+  std::istringstream config_stream(config->ToString());
+  std::string config_line;
+  std::string compatibility_config;
+  while (std::getline(config_stream, config_line)) {
+    if (config_line.empty() || ShouldIgnoreSnapshotConfigLine(config_line)) {
+      continue;
+    }
+    compatibility_config.append(config_line);
+    compatibility_config.push_back('\n');
+  }
+  return compatibility_config;
+}
+
 }  // namespace
 
 int LGBM_config_::current_device = lgbm_device_cpu;
@@ -109,6 +159,22 @@ GBDT::GBDT()
 GBDT::~GBDT() {
 }
 
+GBDT* GBDT::GetSnapshotBoosting(LightGBM::Boosting* boosting) {
+  auto* gbdt = dynamic_cast<GBDT*>(boosting);
+  if (gbdt == nullptr) {
+    Log::Fatal("Training snapshots are only supported for tree boosting models");
+  }
+  return gbdt;
+}
+
+const GBDT* GBDT::GetSnapshotBoosting(const LightGBM::Boosting* boosting) {
+  const auto* gbdt = dynamic_cast<const GBDT*>(boosting);
+  if (gbdt == nullptr) {
+    Log::Fatal("Training snapshots are only supported for tree boosting models");
+  }
+  return gbdt;
+}
+
 void GBDT::Init(const Config* config, const Dataset* train_data, const ObjectiveFunction* objective_function,
                 const std::vector<const Metric*>& training_metrics) {
   CHECK_NOTNULL(train_data);
@@ -125,7 +191,6 @@ void GBDT::Init(const Config* config, const Dataset* train_data, const Objective
   max_feature_idx_ = 0;
   num_class_ = config->num_class;
   config_ = std::unique_ptr<Config>(new Config(*config));
-  snapshot_reference_config_ = config_->ToString();
   early_stopping_round_ = config_->early_stopping_round;
   early_stopping_min_delta_ = config->early_stopping_min_delta;
   es_first_metric_only_ = config_->first_metric_only;
@@ -834,16 +899,7 @@ void GBDT::ResetTrainingData(const Dataset* train_data, const ObjectiveFunction*
     train_data_ = train_data;
     data_sample_strategy_->UpdateTrainingData(train_data);
     // not same training data, need reset score and others
-    // create score tracker
-    #ifdef USE_CUDA
-    if (config_->device_type == std::string("cuda")) {
-      train_score_updater_.reset(new CUDAScoreUpdater(train_data_, num_tree_per_iteration_, boosting_on_gpu_));
-    } else {
-    #endif  // USE_CUDA
-      train_score_updater_.reset(new ScoreUpdater(train_data_, num_tree_per_iteration_));
-    #ifdef USE_CUDA
-    }
-    #endif  // USE_CUDA
+    train_score_updater_ = CreateScoreUpdater(config_->device_type, train_data_, num_tree_per_iteration_, boosting_on_gpu_);
 
     // update score
     for (int i = 0; i < iter_; ++i) {
@@ -950,82 +1006,7 @@ void GBDT::ResetGradientBuffers() {
   }
 }
 
-std::string GBDT::SnapshotTrainingState() const {
-  SnapshotWriter writer;
-  writer.WriteScalar<int>(iter_);
-  writer.WriteScalar<int>(num_init_iteration_);
-  writer.WriteScalar<int>(num_iteration_for_pred_);
-  writer.WriteScalar<int>(start_iteration_for_pred_);
-  writer.WriteScalar<double>(shrinkage_rate_);
-  std::vector<uint8_t> class_need_train(class_need_train_.size(), 0);
-  for (size_t i = 0; i < class_need_train_.size(); ++i) {
-    class_need_train[i] = class_need_train_[i] ? 1 : 0;
-  }
-  writer.WriteVector(class_need_train);
-  WriteNestedVector(&writer, best_iter_);
-  WriteNestedVector(&writer, best_score_);
-  WriteNestedStringVector(&writer, best_msg_);
-  writer.WriteString(tree_learner_->SnapshotState());
-  writer.WriteString(data_sample_strategy_->SnapshotState());
-  return writer.Take();
-}
-
-void GBDT::LoadSnapshotTrainingState(const std::string& state) {
-  SnapshotReader reader(state);
-  iter_ = reader.ReadScalar<int>();
-  num_init_iteration_ = reader.ReadScalar<int>();
-  num_iteration_for_pred_ = reader.ReadScalar<int>();
-  start_iteration_for_pred_ = reader.ReadScalar<int>();
-  shrinkage_rate_ = reader.ReadScalar<double>();
-  const auto class_need_train = reader.ReadVector<uint8_t>();
-  class_need_train_.assign(class_need_train.size(), false);
-  for (size_t i = 0; i < class_need_train.size(); ++i) {
-    class_need_train_[i] = class_need_train[i] != 0;
-  }
-  best_iter_ = ReadNestedVector<int>(&reader);
-  best_score_ = ReadNestedVector<double>(&reader);
-  best_msg_ = ReadNestedStringVector(&reader);
-  tree_learner_->LoadSnapshotState(reader.ReadString());
-  data_sample_strategy_->LoadSnapshotState(reader.ReadString(), tree_learner_.get());
-  if (!reader.IsConsumed()) {
-    Log::Fatal("Snapshot training state is corrupted");
-  }
-}
-
-void GBDT::RestoreScoreUpdaters(const std::vector<double>& train_scores,
-                                const std::vector<std::vector<double>>& valid_scores) {
-  #ifdef USE_CUDA
-  if (config_->device_type == std::string("cuda")) {
-    train_score_updater_.reset(new CUDAScoreUpdater(train_data_, num_tree_per_iteration_, boosting_on_gpu_));
-  } else {
-  #endif  // USE_CUDA
-    train_score_updater_.reset(new ScoreUpdater(train_data_, num_tree_per_iteration_));
-  #ifdef USE_CUDA
-  }
-  #endif  // USE_CUDA
-  train_score_updater_->LoadScoreSnapshot(train_scores);
-
-  valid_score_updater_.clear();
-  valid_score_updater_.reserve(valid_data_.size());
-  if (valid_scores.size() != valid_data_.size()) {
-    Log::Fatal("Snapshot validation score buffers do not match the current training configuration");
-  }
-  for (const auto* valid_data : valid_data_) {
-    auto new_score_updater =
-      #ifdef USE_CUDA
-      config_->device_type == std::string("cuda") ?
-      std::unique_ptr<CUDAScoreUpdater>(new CUDAScoreUpdater(valid_data, num_tree_per_iteration_,
-        objective_function_ != nullptr && objective_function_->IsCUDAObjective())) :
-      #endif  // USE_CUDA
-      std::unique_ptr<ScoreUpdater>(new ScoreUpdater(valid_data, num_tree_per_iteration_));
-    valid_score_updater_.push_back(std::move(new_score_updater));
-  }
-  for (size_t i = 0; i < valid_score_updater_.size(); ++i) {
-    valid_score_updater_[i]->LoadScoreSnapshot(valid_scores[i]);
-  }
-}
-
-bool GBDT::SaveTrainingSnapshot(const char* filename) const {
+void GBDT::CheckSnapshotSupport(const char* filename) const {
   if (filename == nullptr || filename[0] == '\0') {
     Log::Fatal("Snapshot path must not be empty");
   }
@@ -1038,14 +1019,126 @@ bool GBDT::SaveTrainingSnapshot(const char* filename) const {
       Log::Fatal("Training snapshots are not supported for ranking objectives");
     }
   }
+}
+
+std::string GBDT::SnapshotTreeLearnerState() const {
+  // Snapshot support is intentionally limited to the local tree learner path.
+  // New supported tree learner implementations must be wired through here.
+  const auto* snapshot_tree_learner = dynamic_cast<const SerialTreeLearner*>(tree_learner_.get());
+  if (snapshot_tree_learner == nullptr) {
+    Log::Fatal("Training snapshots are not supported for the current tree learner implementation");
+  }
+  return snapshot_tree_learner->SnapshotState();
+}
+
+void GBDT::LoadSnapshotTreeLearnerState(const std::string& state) {
+  // Keep restore dispatch explicit so newly supported tree learners opt in
+  // deliberately rather than picking up snapshot behavior accidentally.
+  auto* snapshot_tree_learner = dynamic_cast<SerialTreeLearner*>(tree_learner_.get());
+  if (snapshot_tree_learner == nullptr) {
+    Log::Fatal("Training snapshots are not supported for the current tree learner implementation");
+  }
+  snapshot_tree_learner->LoadSnapshotState(state);
+}
+
+std::string GBDT::SnapshotSampleStrategyState() const {
+  // Snapshot support is intentionally limited to the concrete local sampling strategies
+  // we currently validate for deterministic resume.
+  if (const auto* bagging_strategy = dynamic_cast<const BaggingSampleStrategy*>(data_sample_strategy_.get())) {
+    return bagging_strategy->SnapshotState();
+  }
+  if (const auto* goss_strategy = dynamic_cast<const GOSSStrategy*>(data_sample_strategy_.get())) {
+    return goss_strategy->SnapshotState();
+  }
+  Log::Fatal("Training snapshots are not supported for the current data sampling strategy");
+  return std::string();
+}
+
+void GBDT::LoadSnapshotSampleStrategyState(const std::string& state) {
+  // If a new supported sampling strategy is added, its snapshot state needs to be
+  // wired through this dispatcher explicitly.
+  if (auto* bagging_strategy = dynamic_cast<BaggingSampleStrategy*>(data_sample_strategy_.get())) {
+    bagging_strategy->LoadSnapshotState(state, tree_learner_.get());
+    return;
+  }
+  if (auto* goss_strategy = dynamic_cast<GOSSStrategy*>(data_sample_strategy_.get())) {
+    goss_strategy->LoadSnapshotState(state, tree_learner_.get());
+    return;
+  }
+  Log::Fatal("Training snapshots are not supported for the current data sampling strategy");
+}
+
+std::string GBDT::SnapshotTrainingState() const {
+  SnapshotWriter writer;
+  writer.WriteScalar<int>(iter_);
+  writer.WriteScalar<int>(num_init_iteration_);
+  writer.WriteScalar<double>(shrinkage_rate_);
+  std::vector<uint8_t> class_need_train(class_need_train_.size(), 0);
+  for (size_t i = 0; i < class_need_train_.size(); ++i) {
+    class_need_train[i] = class_need_train_[i] ? 1 : 0;
+  }
+  writer.WriteVector(class_need_train);
+  WriteNestedVector(&writer, best_iter_);
+  WriteNestedVector(&writer, best_score_);
+  WriteNestedStringVector(&writer, best_msg_);
+  writer.WriteString(SnapshotTreeLearnerState());
+  writer.WriteString(SnapshotSampleStrategyState());
+  return writer.Take();
+}
+
+void GBDT::LoadSnapshotTrainingState(const std::string& state) {
+  SnapshotReader reader(state);
+  iter_ = reader.ReadScalar<int>();
+  num_init_iteration_ = reader.ReadScalar<int>();
+  shrinkage_rate_ = reader.ReadScalar<double>();
+  const auto class_need_train = reader.ReadVector<uint8_t>();
+  class_need_train_.assign(class_need_train.size(), false);
+  for (size_t i = 0; i < class_need_train.size(); ++i) {
+    class_need_train_[i] = class_need_train[i] != 0;
+  }
+  best_iter_ = ReadNestedVector<int>(&reader);
+  best_score_ = ReadNestedVector<double>(&reader);
+  best_msg_ = ReadNestedStringVector(&reader);
+  LoadSnapshotTreeLearnerState(reader.ReadString());
+  LoadSnapshotSampleStrategyState(reader.ReadString());
+  if (!reader.IsConsumed()) {
+    Log::Fatal("Snapshot training state is corrupted");
+  }
+}
+
+void GBDT::RestoreScoreUpdaters(const std::vector<double>& train_scores,
+                                const std::vector<std::vector<double>>& valid_scores) {
+  train_score_updater_ = CreateScoreUpdater(config_->device_type, train_data_, num_tree_per_iteration_, boosting_on_gpu_);
+  train_score_updater_->LoadScoreSnapshot(train_scores);
+
+  valid_score_updater_.clear();
+  valid_score_updater_.reserve(valid_data_.size());
+  if (valid_scores.size() != valid_data_.size()) {
+    Log::Fatal("Snapshot validation score buffers do not match the current training configuration");
+  }
+  for (const auto* valid_data : valid_data_) {
+    valid_score_updater_.push_back(CreateScoreUpdater(
+        config_->device_type,
+        valid_data,
+        num_tree_per_iteration_,
+        objective_function_ != nullptr && objective_function_->IsCUDAObjective()));
+  }
+  for (size_t i = 0; i < valid_score_updater_.size(); ++i) {
+    valid_score_updater_[i]->LoadScoreSnapshot(valid_scores[i]);
+  }
+}
+
+bool GBDT::SaveTrainingSnapshot(const char* filename) const {
+  CheckSnapshotSupport(filename);
 
   SnapshotWriter writer;
   writer.WriteString(kSnapshotMagic);
   writer.WriteScalar<uint32_t>(kSnapshotVersion);
-  writer.WriteString(snapshot_reference_config_);
+  writer.WriteString(SnapshotCompatibilityConfigString(config_.get()));
   writer.WriteScalar<data_size_t>(train_data_->num_data());
   writer.WriteScalar<int>(max_feature_idx_);
   writer.WriteScalar<uint64_t>(static_cast<uint64_t>(valid_data_.size()));
+  writer.WriteScalar<uint32_t>(0);
   writer.WriteString(SaveModelToString(0, -1, config_->saved_feature_importance_type));
   writer.WriteString(SnapshotTrainingState());
   writer.WriteVector(train_score_updater_->ScoreSnapshot());
@@ -1059,18 +1152,7 @@ bool GBDT::SaveTrainingSnapshot(const char* filename) const {
 }
 
 bool GBDT::LoadTrainingSnapshot(const char* filename) {
-  if (filename == nullptr || filename[0] == '\0') {
-    Log::Fatal("Snapshot path must not be empty");
-  }
-  if (Network::num_machines() > 1) {
-    Log::Fatal("Training snapshots are not supported for distributed training");
-  }
-  if (objective_function_ != nullptr) {
-    const auto objective_name = std::string(objective_function_->GetName());
-    if (objective_name == std::string("lambdarank") || objective_name == std::string("rank_xendcg")) {
-      Log::Fatal("Training snapshots are not supported for ranking objectives");
-    }
-  }
+  CheckSnapshotSupport(filename);
 
   const std::string snapshot_buffer = SnapshotManager::Read(filename);
   SnapshotReader reader(snapshot_buffer);
@@ -1080,8 +1162,7 @@ bool GBDT::LoadTrainingSnapshot(const char* filename) {
   if (reader.ReadScalar<uint32_t>() != kSnapshotVersion) {
     Log::Fatal("Snapshot file %s has an unsupported version", filename);
   }
-  const auto snapshot_config = reader.ReadString();
-  if (snapshot_config != snapshot_reference_config_) {
+  if (reader.ReadString() != SnapshotCompatibilityConfigString(config_.get())) {
     Log::Fatal("Snapshot parameters do not match the current training configuration");
   }
   if (reader.ReadScalar<data_size_t>() != train_data_->num_data()) {
@@ -1093,6 +1174,10 @@ bool GBDT::LoadTrainingSnapshot(const char* filename) {
   if (reader.ReadScalar<uint64_t>() != static_cast<uint64_t>(valid_data_.size())) {
     Log::Fatal("Snapshot validation data count does not match the current training configuration");
   }
+  const auto reserved_snapshot_sections = reader.ReadScalar<uint32_t>();
+  for (uint32_t i = 0; i < reserved_snapshot_sections; ++i) {
+    static_cast<void>(reader.ReadString());
+  }
   const std::string model_string = reader.ReadString();
   const std::string training_state = reader.ReadString();
   const auto train_scores = reader.ReadVector<double>();
@@ -1100,6 +1185,7 @@ bool GBDT::LoadTrainingSnapshot(const char* filename) {
   if (!reader.IsConsumed()) {
     Log::Fatal("Snapshot file %s is corrupted", filename);
   }
+
   std::unique_ptr<LightGBM::Boosting> snapshot_model(
       LightGBM::Boosting::CreateBoosting(config_->boosting, nullptr, config_->device_type, config_->num_gpu));
   if (snapshot_model == nullptr || !snapshot_model->LoadModelFromString(model_string.c_str(), model_string.size())) {
@@ -1108,6 +1194,10 @@ bool GBDT::LoadTrainingSnapshot(const char* filename) {
   models_.clear();
   MergeFrom(snapshot_model.get());
   LoadSnapshotTrainingState(training_state);
+  CHECK_GT(num_tree_per_iteration_, 0);
+  num_iteration_for_pred_ = static_cast<int>(models_.size()) / num_tree_per_iteration_;
+  start_iteration_for_pred_ = 0;
+  models_initialized_ = false;
   RestoreScoreUpdaters(train_scores, valid_scores);
   return true;
 }

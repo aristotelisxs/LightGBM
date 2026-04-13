@@ -164,7 +164,7 @@ class GBDT : public GBDTBase {
   */
   int GetCurrentIteration() const override { return static_cast<int>(models_.size()) / num_tree_per_iteration_; }
 
-  int GetCurrentTrainingIteration() const override { return iter_; }
+  int GetCurrentTrainingIteration() const { return iter_; }
 
   /*!
   * \brief Get parameters as a JSON string
@@ -370,9 +370,13 @@ class GBDT : public GBDTBase {
   */
   bool LoadModelFromString(const char* buffer, size_t len) override;
 
-  bool SaveTrainingSnapshot(const char* filename) const override;
+  bool SaveTrainingSnapshot(const char* filename) const;
 
-  bool LoadTrainingSnapshot(const char* filename) override;
+  bool LoadTrainingSnapshot(const char* filename);
+
+  static GBDT* GetSnapshotBoosting(Boosting* boosting);
+
+  static const GBDT* GetSnapshotBoosting(const Boosting* boosting);
 
   /*!
   * \brief Calculate feature importances
@@ -533,6 +537,16 @@ class GBDT : public GBDTBase {
   void RestoreScoreUpdaters(const std::vector<double>& train_scores,
                             const std::vector<std::vector<double>>& valid_scores);
 
+  void CheckSnapshotSupport(const char* filename) const;
+
+  std::string SnapshotTreeLearnerState() const;
+
+  void LoadSnapshotTreeLearnerState(const std::string& state);
+
+  std::string SnapshotSampleStrategyState() const;
+
+  void LoadSnapshotSampleStrategyState(const std::string& state);
+
   /*! \brief current iteration */
   int iter_;
   /*! \brief Pointer to training data */
@@ -629,7 +643,6 @@ class GBDT : public GBDTBase {
   bool need_re_bagging_;
   bool balanced_bagging_;
   std::string loaded_parameter_;
-  std::string snapshot_reference_config_;
   std::vector<int8_t> monotone_constraints_;
   Json forced_splits_json_;
   bool linear_tree_;

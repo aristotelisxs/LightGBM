@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "predictor.hpp"
+#include "../boosting/gbdt.h"
 #include "../io/snapshot_manager.hpp"
 
 namespace LightGBM {
@@ -225,9 +226,10 @@ void Application::InitTrain() {
     Log::Debug("Number of data points in validation set #%zu: %d", i + 1, valid_datas_[i]->num_data());
   }
   if (config_.save_snapshot && SnapshotManager::Exists(config_.snapshot_path)) {
-    boosting_->LoadTrainingSnapshot(config_.snapshot_path.c_str());
+    auto* snapshot_boosting = GBDT::GetSnapshotBoosting(boosting_.get());
+    snapshot_boosting->LoadTrainingSnapshot(config_.snapshot_path.c_str());
     Log::Info("Resumed training from snapshot %s at iteration %d",
-              config_.snapshot_path.c_str(), boosting_->GetCurrentTrainingIteration());
+              config_.snapshot_path.c_str(), snapshot_boosting->GetCurrentTrainingIteration());
   }
   Log::Info("Finished initializing training");
 }

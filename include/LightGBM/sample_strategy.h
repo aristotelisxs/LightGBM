@@ -60,10 +60,6 @@ class SampleStrategy {
 
   virtual const data_size_t* sampled_query_indices() const { return nullptr; }
 
-  virtual std::string SnapshotState() const = 0;
-
-  virtual void LoadSnapshotState(const std::string& state, TreeLearner* tree_learner) = 0;
-
  protected:
   const Config* config_;
   const Dataset* train_data_;
